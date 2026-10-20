@@ -1,0 +1,12 @@
+# 索引缓存
+.qa_index.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
