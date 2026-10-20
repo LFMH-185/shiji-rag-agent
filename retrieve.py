@@ -104,6 +104,40 @@ def normalize(text: str) -> str:
 
 _PUNCT = re.compile(r"[《》〈〉“”‘’\"'（）()【】\[\]·、，。！？；：\s]")
 
+# 口语化提问里的填充词：先删长短语，再删语气词，只留下核心实词
+FILLER_PHRASES = (
+    "我记得", "我想问", "想问一下", "想问", "请问", "告诉我", "跟我说说", "说一下",
+    "是什么意思", "是怎么", "是怎么回事", "怎么样", "是什么", "是谁", "为什么",
+    "有没有", "是不是", "能不能", "可不可以", "到底", "究竟", "其实", "但是", "不过",
+    "而且", "然后", "所以", "因为", "如果", "那么", "这个", "那个", "这些", "那些",
+)
+# 作为独立 token 时才删除的虚词（不拆词内字符，避免误伤「太史公」「过秦论」）
+STOP_TOKENS = {
+    "的", "了", "吗", "呢", "吧", "啊", "呀", "哦", "哈", "么", "嘛", "着", "过",
+    "我", "你", "他", "她", "它", "是", "没", "有", "在", "和", "与", "而", "并",
+    "很", "太", "都", "也", "又", "就", "还", "再", "才", "这", "那", "个", "些",
+    "其", "之", "于", "被", "把", "给", "让", "对", "从", "到",
+}
+
+# 只保留这些词性作为「实体候选」：名词、专名、时间、处所
+ENTITY_FLAGS = ("n", "nr", "ns", "nt", "nz", "nw", "j")
+
+
+def clean_query(query: str) -> str:
+    """去掉疑问词、语气词和口语填充，只保留核心实词。"""
+    text = query
+    for phrase in FILLER_PHRASES:
+        text = text.replace(phrase, " ")
+    text = _PUNCT.sub(" ", text)
+
+    if jieba is not None:
+        words = [w for w in jieba.lcut(text) if w.strip() and w not in STOP_TOKENS]
+    else:
+        words = [w for w in text.split() if w not in STOP_TOKENS]
+
+    cleaned = " ".join(words).strip()
+    return cleaned if len(cleaned) >= 2 else query.strip()
+
 
 def expand_query(query: str) -> tuple[str, list[str]]:
     """返回 (扩展后的查询串, 实际用到的同义词)。
@@ -355,12 +389,15 @@ class Retriever:
             self.reranker = Reranker(args.reranker_model, args.device)
 
     def search(self, query: str, top_k: int, volume: int | None = None) -> tuple[list[tuple[float, Chunk, dict]], dict]:
+        # 长口语问句（「我记得/没继承过/啊」）会稀释向量相似度，只对 Dense 做清洗；
+        # BM25 仍用原句 + 同义词扩展，避免「破釜沉舟」这类成语被误删。
+        cleaned = clean_query(query) if len(query) >= 12 else query
         expanded, additions = expand_query(query)
         dense_hits: list[tuple[str, float]] = []
         sparse_hits: list[tuple[str, float]] = []
 
         if self.dense is not None:
-            search_query = expanded if self.args.expand_dense else query
+            search_query = expanded if self.args.expand_dense else cleaned
             dense_hits = self.dense.search(search_query, self.args.dense_k, volume)
 
         if self.bm25 is not None:
@@ -381,10 +418,52 @@ class Retriever:
         else:
             fused = fused[:top_k]
 
-        meta = {"expanded_query": expanded, "expansions": additions}
+        meta = {
+            "raw_query": query,
+            "cleaned_query": cleaned,
+            "expanded_query": expanded,
+            "expansions": additions,
+        }
         if self.args.neighbors:
             fused = self._add_neighbors(fused, self.args.neighbors)
         return fused, meta
+
+    def entity_candidates(self, query: str, limit: int = 3) -> list[tuple[str, float]]:
+        """抽取疑问句里的实体（名词/专名），按 idf（稀有度）排序。"""
+        if jieba is None or self.bm25 is None:
+            return []
+        import jieba.posseg as pseg
+
+        scored: dict[str, float] = {}
+        for word, flag in pseg.cut(query):
+            if len(word) < 2:
+                continue
+            if not (flag.startswith("n") or flag in ENTITY_FLAGS):
+                continue
+            idf = self.bm25.idf.get(word)
+            if idf is None:          # 语料里根本没出现过的词
+                continue
+            scored[word] = idf
+        return sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+    def search_entities(self, query: str, top_k: int) -> tuple[list[tuple[float, Chunk, dict]], dict, str]:
+        """实体兜底：整句相似度不够时，退化为只用核心实体检索。"""
+        best: tuple[list, dict, str] = ([], {}, "")
+        best_score = -1.0
+        for word, _ in self.entity_candidates(query):
+            results, meta = self.search(word, top_k)
+            if not results:
+                continue
+            max_bm25 = max((info.get("bm25_score") or 0) for _, _, info in results)
+            top_sim = next(
+                (info.get("dense_sim") or 0 for _, _, info in results if not info.get("neighbor_of")),
+                0.0,
+            )
+            # 平衡字面命中与语义相似度，选表现最好的实体
+            score = max_bm25 + top_sim * 10
+            if score > best_score:
+                best, best_score = (results, meta, word), score
+        return best
 
     def _add_neighbors(self, results, count: int):
         """把命中块前后各 count 块附在后面，避免断章取义；不跨篇。"""

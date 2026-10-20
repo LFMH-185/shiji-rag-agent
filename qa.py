@@ -113,11 +113,22 @@ def build_context(results) -> tuple[str, list[dict]]:
 
 
 def confidence_of(results) -> tuple[float, float]:
-    """取首个非邻块的 dense 相似度与 BM25 分数。"""
+    """取首个非邻块的 dense 相似度，以及所有命中块里的最高 BM25 分数。
+
+    BM25 用全局最大值：排第一的块可能恰好没有字面命中，而第 5 名命中很强，
+    只看第一名会误判为「无命中」。
+    """
+    top_sim = 0.0
+    max_bm25 = 0.0
+    found = False
     for _, _, info in results:
-        if not info.get("neighbor_of"):
-            return float(info.get("dense_sim") or 0.0), float(info.get("bm25_score") or 0.0)
-    return 0.0, 0.0
+        if info.get("neighbor_of"):
+            continue
+        if not found:
+            top_sim = float(info.get("dense_sim") or 0.0)
+            found = True
+        max_bm25 = max(max_bm25, float(info.get("bm25_score") or 0.0))
+    return top_sim, max_bm25
 
 
 # ---------------------------------------------------------------- DeepSeek
@@ -229,6 +240,16 @@ def answer(args: argparse.Namespace, retriever: Retriever, question: str) -> int
         return 0
 
     similarity, bm25_score = confidence_of(results)
+    if similarity < args.gate and bm25_score <= 0:
+        # 实体兜底：长口语问句里只要还有《史记》里的专名，就强制召回交给大模型判断
+        fb_results, fb_meta, entity = retriever.search_entities(question, args.top_k)
+        if fb_results:
+            fb_sim, fb_bm25 = confidence_of(fb_results)
+            if fb_bm25 > 0 or fb_sim >= 0.40:
+                results, meta, entity = fb_results, fb_meta, entity
+                similarity, bm25_score = fb_sim, fb_bm25
+                print(f"[检索] 整句置信不足，改用实体「{entity}」兜底召回", file=sys.stderr)
+
     if similarity < args.gate and bm25_score <= 0:
         print(f"{REFUSAL}")
         print(f"（检索置信度不足：dense {similarity:.3f} < {args.gate}，BM25 无命中）", file=sys.stderr)

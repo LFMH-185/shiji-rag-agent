@@ -221,14 +221,24 @@ def retrieve(question: str, previous_messages: list[dict], retriever):
     similarity, bm25_score = confidence_of(primary) if primary else (0.0, 0.0)
     confident = similarity >= GATE or bm25_score > 0
 
-    merged = retrieval_query(question, previous_messages)
-    if confident or merged == question:
+    if confident:
         return question, primary, primary_meta
 
-    merged_results, merged_meta = retriever.search(merged, TOP_K)
-    merged_sim, merged_bm25 = confidence_of(merged_results) if merged_results else (0.0, 0.0)
-    if merged_bm25 > bm25_score or merged_sim > similarity + 0.02:
-        return merged, merged_results, merged_meta
+    merged = retrieval_query(question, previous_messages)
+    if merged != question:
+        merged_results, merged_meta = retriever.search(merged, TOP_K)
+        merged_sim, merged_bm25 = confidence_of(merged_results) if merged_results else (0.0, 0.0)
+        if merged_bm25 > bm25_score or merged_sim > similarity + 0.02:
+            return merged, merged_results, merged_meta
+
+    # 实体兜底：长口语问句里只要还有《史记》里的专名，就放宽阈值强制召回
+    fb_results, fb_meta, entity = retriever.search_entities(question, TOP_K)
+    if fb_results:
+        fb_sim, fb_bm25 = confidence_of(fb_results)
+        if fb_bm25 > 0 or fb_sim >= 0.40:
+            fb_meta = {**fb_meta, "fallback_entity": entity}
+            return entity, fb_results, fb_meta
+
     return question, primary, primary_meta
 
 
@@ -288,12 +298,15 @@ def handle_question(question: str, retriever, api_key: str) -> None:
     similarity, bm25_score = confidence_of(results) if results else (0.0, 0.0)
     tech = {
         "检索词": query,
+        "清洗后": meta.get("cleaned_query"),
         "dense_similarity": round(similarity, 4),
         "bm25_score": round(bm25_score, 2),
         "gate": GATE,
         "chunks": len(results),
         "expansions": meta.get("expansions", []),
     }
+    if meta.get("fallback_entity"):
+        tech["实体兜底"] = meta["fallback_entity"]
 
     with st.chat_message("assistant"):
         # 检索置信度不足：本地拒答，不调用 API
