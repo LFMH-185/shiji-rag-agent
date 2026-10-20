@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import sys
 import time
 from datetime import datetime
@@ -97,8 +99,34 @@ def write_manifest(db_dir: Path, payload: dict) -> None:
 # ---------------------------------------------------------------- 模型
 
 
+def find_cached_model(model_name: str) -> str | None:
+    """在 ModelScope / HuggingFace 的默认缓存里找已下载的模型，避免重复联网。"""
+    home = Path.home()
+    slug = model_name.replace("/", "--")
+    candidates = [
+        home / ".cache" / "modelscope" / "models" / slug / "snapshots" / "master",
+    ]
+    hf_root = home / ".cache" / "huggingface" / "hub" / f"models--{slug}" / "snapshots"
+    if hf_root.exists():
+        snapshots = sorted(
+            (item for item in hf_root.iterdir() if (item / "config.json").exists()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        candidates.extend(snapshots[:1])
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "config.json").exists():
+            return str(candidate)
+    return None
+
+
 def resolve_model(model_name: str, model_path: str | None) -> str:
-    """优先用本地路径；否则依次尝试 HuggingFace 缓存、ModelScope 下载。"""
+    """优先用本地路径；否则按平台选择下载源。
+
+    Windows（本地开发，国内网络）优先 ModelScope；
+    Linux（Streamlit Cloud 等海外环境）优先 HuggingFace，避免跨境拉取慢。
+    可用环境变量 SHIJI_MODEL_SOURCE=hf|modelscope 强制指定。
+    """
     if model_path:
         candidate = Path(model_path)
         if not candidate.exists():
@@ -109,25 +137,42 @@ def resolve_model(model_name: str, model_path: str | None) -> str:
     if local.exists():
         return str(local)
 
-    errors: list[str] = []
-    try:
-        from modelscope import snapshot_download  # 国内可达
+    cached = find_cached_model(model_name)
+    if cached:
+        print(f"使用本地缓存模型: {cached}")
+        return cached
 
-        print(f"本地没有模型，尝试从 ModelScope 下载 {model_name} …")
+    def try_modelscope() -> str:
+        from modelscope import snapshot_download
+
+        print(f"尝试从 ModelScope 下载 {model_name} …")
         downloaded = snapshot_download(model_name)
         print(f"下载完成: {downloaded}")
         return downloaded
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"ModelScope: {exc}")
 
-    try:
+    def try_huggingface() -> str:
         from sentence_transformers import SentenceTransformer
 
-        print(f"尝试 HuggingFace 直连 {model_name} …")
+        print(f"尝试从 HuggingFace 加载 {model_name} …")
         SentenceTransformer(model_name)
         return model_name
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"HuggingFace: {exc}")
+
+    preference = os.getenv("SHIJI_MODEL_SOURCE", "").strip().lower()
+    if preference == "hf":
+        order = [("HuggingFace", try_huggingface), ("ModelScope", try_modelscope)]
+    elif preference == "modelscope":
+        order = [("ModelScope", try_modelscope), ("HuggingFace", try_huggingface)]
+    elif platform.system() == "Windows":
+        order = [("ModelScope", try_modelscope), ("HuggingFace", try_huggingface)]
+    else:
+        order = [("HuggingFace", try_huggingface), ("ModelScope", try_modelscope)]
+
+    errors: list[str] = []
+    for name, loader in order:
+        try:
+            return loader()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
 
     raise SystemExit(
         "模型获取失败，请手动下载后重试：\n"
@@ -304,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     device = pick_device(args.device)
     model_ref = resolve_model(args.model_name, args.model_path)
     embedder = load_embedder(model_ref, device)
-    dimension = embedder.get_sentence_embedding_dimension()
+    dimension = getattr(embedder, "get_embedding_dimension", embedder.get_sentence_embedding_dimension)()
 
     # 走到这里说明内容有变（或显式 --rebuild），整库重建最稳妥：
     # 旧集合的向量维度/模型可能不同，混写会出问题

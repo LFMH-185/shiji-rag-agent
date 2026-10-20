@@ -363,22 +363,28 @@ DEEPSEEK_API_KEY = "sk-你的key"
 保存后点击 **Reboot app**。Streamlit Cloud 会把 Secrets 以环境变量形式注入，
 `app.py` 通过 `os.environ.get("DEEPSEEK_API_KEY")` 读取，不需要在界面上填任何东西。
 
-### 3. 语料与索引
+### 3. 语料与索引（自动构建）
 
-仓库默认忽略了 `shiji.txt` 与 `data/`（语料与索引合计约 37 MB）。
-云端没有这些文件时，页面会显示「系统维护中」。二选一：
+`shiji.txt` 已随仓库提交；`data/` 被忽略，由应用在云端**首次启动时自动构建**：
 
-**方案 A（推荐，简单）**：把语料和索引一起提交
+```text
+检测 data/chroma → 不存在
+  → 页面提示「首次启动，正在构建知识库，请稍候」
+  → preprocess.py 切块（约 3 秒）
+  → index.py 下载模型并建向量库（约 2–4 分钟）
+  → 构建完成后自动进入聊天界面
+```
+
+- 构建结果在实例存活期间缓存；重新部署或冷启动会重新构建
+- 想跳过构建，可把产物一起提交（约 37 MB）：
 
 ```bash
-git add -f shiji.txt data/chunks.jsonl data/chroma
-git commit -m "Add corpus and index for deployment"
+git add -f data/chunks.jsonl data/chroma
+git commit -m "Add prebuilt index for faster cold start"
 git push
 ```
 
-**方案 B（保持仓库精简）**：只提交 `shiji.txt`，在云端首次启动时构建索引。
-需要把 `app.py` 改成启动前检查并调用 `preprocess.py` / `index.py`（首次约 3–5 分钟），
-当前版本未内置该逻辑。
+- 若构建失败（例如语料缺失），页面只显示「系统维护中」，详细原因在应用日志里
 
 ### 4. 资源与冷启动
 

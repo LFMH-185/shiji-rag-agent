@@ -1,5 +1,5 @@
-# 语料：体积大，仅本地使用，不入库
-shiji.txt
+# 语料：shiji.txt 需要随仓库部署（云端首次启动自动建库）
+# 备份/补丁/临时产物不入库
 shiji.txt.txt
 shiji.txt.bak
 shiji_full.txt

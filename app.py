@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
+from pathlib import Path
 
 import streamlit as st
 
@@ -44,6 +46,11 @@ GATE = 0.65
 COOLDOWN_SECONDS = 2.0
 
 HISTORY_TURNS = 3
+
+# 云端首次启动时需要本地构建的产物
+CORPUS_FILE = Path("shiji.txt")
+CHUNKS_FILE = Path(DEFAULT_CHUNKS)
+CHROMA_DIR = Path(DEFAULT_DB)
 
 # ---------------------------------------------------------------- 文案
 MAINTENANCE_TEXT = "系统维护中，请稍后再试。"
@@ -74,6 +81,99 @@ USAGE_TEXT = """1. 直接在下方输入问题，例如「鸿门宴」「商鞅�
 
 
 # ---------------------------------------------------------------- 资源
+
+
+# 建库放在后台线程，避免阻塞 Streamlit 首帧渲染（否则前端会一直白屏）
+# 用文件锁保证整个实例只有一个构建进程，避免多会话同时建库互相删集合
+BUILD_LOCK = Path("data/.build.lock")
+BUILD_ERROR = Path("data/.build.error")
+
+
+def knowledge_ready() -> bool:
+    return CHUNKS_FILE.exists() and (CHROMA_DIR / "manifest.json").exists()
+
+
+def build_knowledge_base() -> None:
+    """云端冷启动时，从 shiji.txt 自动切块并建向量库。
+
+    用子进程执行，避免 torch / Chroma 在 Streamlit 脚本线程里初始化时卡死。
+    """
+    import subprocess
+
+    if not CORPUS_FILE.exists():
+        raise FileNotFoundError("shiji.txt 不存在，无法构建知识库")
+
+    for script in ("preprocess.py", "index.py"):
+        completed = subprocess.run(
+            [sys.executable, script],
+            cwd=str(Path(__file__).parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1800,
+        )
+        print(f"[build] {script} exit={completed.returncode}", file=sys.stderr)
+        if completed.stdout:
+            print(completed.stdout[-2000:], file=sys.stderr)
+        if completed.returncode != 0:
+            print(completed.stderr[-2000:], file=sys.stderr)
+            raise RuntimeError(f"{script} 执行失败（exit {completed.returncode}）")
+    if not knowledge_ready():
+        raise RuntimeError("构建结束但索引文件缺失")
+
+
+def start_background_build() -> None:
+    """通过文件锁保证同一时刻只有一个构建进程。"""
+    if knowledge_ready():
+        return
+    BUILD_LOCK.parent.mkdir(parents=True, exist_ok=True)
+
+    # 清理超过 30 分钟的僵死锁
+    if BUILD_LOCK.exists():
+        try:
+            if time.time() - BUILD_LOCK.stat().st_mtime > 1800:
+                BUILD_LOCK.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        handle = os.open(BUILD_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return
+    os.write(handle, str(time.time()).encode())
+    os.close(handle)
+    BUILD_ERROR.unlink(missing_ok=True)
+
+    def worker() -> None:
+        try:
+            build_knowledge_base()
+        except Exception as exc:  # noqa: BLE001
+            BUILD_ERROR.write_text(str(exc), encoding="utf-8")
+            print(f"[app] 构建知识库失败: {exc}", file=sys.stderr)
+        finally:
+            BUILD_LOCK.unlink(missing_ok=True)
+
+    threading.Thread(target=worker, name="shiji-build", daemon=True).start()
+
+
+@st.fragment(run_every=2)
+def render_build_progress() -> None:
+    """每 2 秒刷新一次构建进度，不阻塞首帧。"""
+    if knowledge_ready():
+        st.rerun(scope="app")
+    if BUILD_ERROR.exists():
+        print(f"[app] 构建错误: {BUILD_ERROR.read_text(encoding='utf-8')}", file=sys.stderr)
+        st.error(MAINTENANCE_TEXT)
+        return
+    if not BUILD_LOCK.exists():
+        # 锁没了但还没就绪：可能刚失败或进程被杀
+        if not knowledge_ready():
+            st.error(MAINTENANCE_TEXT)
+        return
+    elapsed = int(time.time() - BUILD_LOCK.stat().st_mtime)
+    st.progress(min(0.95, elapsed / 180))
+    st.caption(f"已用时 {elapsed} 秒 · 正在解析原文并生成向量索引")
 
 
 @st.cache_resource(show_spinner="正在准备《史记》知识库…")
@@ -276,6 +376,13 @@ def main() -> None:
 
     st.title("📜 《史记》问答")
     st.caption("白话讲解 · 原文佐证 · 出处可查")
+
+    # 云端首次启动：后台构建，不阻塞首帧；fragment 每 2 秒刷新进度
+    if not knowledge_ready():
+        st.info("首次启动，正在构建知识库，请稍候（约 2–3 分钟，只需一次）…")
+        start_background_build()
+        render_build_progress()
+        st.stop()
 
     render_sidebar()
 
