@@ -215,6 +215,45 @@ def retrieval_query(question: str, previous_messages: list[dict]) -> str:
     return f"{previous} {question}"
 
 
+def entity_fallback(question: str, retriever, top_k: int):
+    """实体兜底：优先用 retrieve.py 的新方法；旧版没有该方法时本地降级实现。
+
+    云端曾出现「模块已更新但进程仍加载旧 retrieve.py」导致的 AttributeError，
+    这里做兼容，保证页面不会因为版本不同步而崩溃。
+    """
+    method = getattr(retriever, "search_entities", None)
+    if callable(method):
+        try:
+            return method(question, top_k)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] search_entities 调用失败，改用本地兜底: {exc}", file=sys.stderr)
+
+    try:
+        import jieba.posseg as pseg
+    except ImportError:
+        return [], {}, ""
+
+    idf = getattr(getattr(retriever, "bm25", None), "idf", {}) or {}
+    flags = ("n", "nr", "ns", "nt", "nz", "nw", "j")
+    candidates: list[tuple[float, str]] = []
+    for word, flag in pseg.cut(question):
+        if len(word) < 2:
+            continue
+        if not (flag.startswith("n") or flag in flags):
+            continue
+        if idf and word not in idf:
+            continue
+        candidates.append((idf.get(word, 0.0), word))
+    candidates.sort(reverse=True)
+
+    for _, word in candidates[:3]:
+        results, meta = retriever.search(word, top_k)
+        if results:
+            meta["fallback_entity"] = word
+            return results, meta, word
+    return [], {}, ""
+
+
 def retrieve(question: str, previous_messages: list[dict], retriever):
     """先单独检索；置信度不足时才合并上一轮问题再试一次。"""
     primary, primary_meta = retriever.search(question, TOP_K)
@@ -232,7 +271,7 @@ def retrieve(question: str, previous_messages: list[dict], retriever):
             return merged, merged_results, merged_meta
 
     # 实体兜底：长口语问句里只要还有《史记》里的专名，就放宽阈值强制召回
-    fb_results, fb_meta, entity = retriever.search_entities(question, TOP_K)
+    fb_results, fb_meta, entity = entity_fallback(question, retriever, TOP_K)
     if fb_results:
         fb_sim, fb_bm25 = confidence_of(fb_results)
         if fb_bm25 > 0 or fb_sim >= 0.40:
@@ -388,7 +427,7 @@ def main() -> None:
         st.stop()
 
     st.title("📜 《史记》问答")
-    st.caption("白话讲解 · 原文佐证 · 出处可查")
+    st.caption("白话讲解 · 原文佐证 · 出处可查 · v1.1")
 
     # 云端首次启动：后台构建，不阻塞首帧；fragment 每 2 秒刷新进度
     if not knowledge_ready():
