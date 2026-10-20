@@ -1,11 +1,21 @@
-# 索引缓存
+# 语料：体积大，仅本地使用，不入库
+shiji.txt
+shiji.txt.txt
+
+# 索引缓存（由脚本自动生成）
 .qa_index.json
+.cache/
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
+
+# 环境变量与密钥
+.env
+.env.*
 
 # 编辑器
 .vscode/
