@@ -390,6 +390,7 @@ git push
 
 - 免费实例 1 GB 内存，本方案（bge-small + Chroma）常驻约 400 MB，足够
 - 首次加载模型与索引约 8 秒，之后走缓存
+- 受限于 Streamlit 免费版算力，首次建库时可能会触发平台保护，等待片刻即可正常使用
 - 修改 Secrets 或代码后，记得 **Reboot app**
 
 ---
