@@ -1,0 +1,7 @@
+[server]
+# 关闭文件监视：Streamlit 扫描 transformers 时会尝试导入大量图像处理模块，
+# 在没装 torchvision 的环境里会刷一堆 ModuleNotFoundError，与项目功能无关。
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

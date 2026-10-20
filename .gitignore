@@ -1,10 +1,18 @@
 # 语料：体积大，仅本地使用，不入库
 shiji.txt
 shiji.txt.txt
+shiji.txt.bak
+shiji_full.txt
+bu.txt
 
 # 索引缓存（由脚本自动生成）
 .qa_index.json
 .cache/
+
+# 预处理产物与向量库（可本地重建，不入库）
+data/chunks.jsonl
+data/index_meta.json
+data/chroma/
 
 # Python
 __pycache__/
@@ -20,3 +28,6 @@ env/
 # 编辑器
 .vscode/
 .idea/
+
+# 评测报告（可重新生成）
+eval/report.json

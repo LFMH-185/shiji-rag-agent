@@ -1,0 +1,10 @@
+# 第一步：预处理与切块
+langchain-text-splitters>=0.3.0
+
+# 第二步：向量化与检索
+torch>=2.2.0                 # Windows 下 pip 默认装 CPU 版，约 200MB
+sentence-transformers>=3.0.0 # Embedding 与 Reranker 都用它
+chromadb>=0.5.0
+modelscope>=1.15.0           # 国内下载 BAAI/bge-* 模型（HuggingFace 常被墙）
+jieba>=0.42.1                # BM25 分词（retrieve.py 用）
+streamlit>=1.40.0            # Web 界面（app.py）

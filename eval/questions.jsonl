@@ -1,0 +1,30 @@
+{"id": "q01", "type": "positive", "question": "秦始皇焚书坑儒的具体经过是怎样的", "gold": [{"volume_no": 6, "contains": "非博士官所职"}, {"volume_no": 6, "contains": "四百六十馀人"}], "note": "李斯奏议（焚书）+ 坑术士"}
+{"id": "q02", "type": "positive", "question": "鸿门宴上项庄做了什么", "gold": [{"volume_no": 7, "contains": "项庄拔剑起舞"}], "note": "项庄舞剑，意在沛公"}
+{"id": "q03", "type": "positive", "question": "荆轲刺秦王的结果如何", "gold": [{"volume_no": 86, "contains": "图穷而匕首见"}], "note": "图穷匕见"}
+{"id": "q04", "type": "positive", "question": "商鞅变法的主要内容是什么", "gold": [{"volume_no": 68, "contains": "令民为什伍"}], "note": "什伍连坐、奖励耕战"}
+{"id": "q05", "type": "positive", "question": "赵高指鹿为马是怎么回事", "gold": [{"volume_no": 6, "contains": "持鹿献於二世"}], "note": "二世胡亥时"}
+{"id": "q06", "type": "positive", "question": "项羽破釜沉舟发生在哪场战役", "gold": [{"volume_no": 7, "contains": "破釜甑"}], "note": "钜鹿之战"}
+{"id": "q07", "type": "positive", "question": "刘邦为什么能得天下", "gold": [{"volume_no": 8, "contains": "吾能用之"}], "note": "三杰论"}
+{"id": "q08", "type": "positive", "question": "太史公如何评价项羽的失败", "gold": [{"volume_no": 7, "contains": "自矜功伐"}], "note": "太史公曰"}
+{"id": "q09", "type": "positive", "question": "勾践卧薪尝胆是怎么做的", "gold": [{"volume_no": 41, "contains": "置胆於坐"}], "note": "越王句践世家"}
+{"id": "q10", "type": "positive", "question": "蔺相如完璧归赵的经过", "gold": [{"volume_no": 81, "contains": "和氏璧"}], "note": "廉颇蔺相如列传"}
+{"id": "q11", "type": "positive", "question": "廉颇负荆请罪是怎么回事", "gold": [{"volume_no": 81, "contains": "肉袒负荆"}], "note": "将相和"}
+{"id": "q12", "type": "positive", "question": "毛遂自荐的故事", "gold": [{"volume_no": 76, "contains": "颖脱而出"}], "note": "平原君门下"}
+{"id": "q13", "type": "positive", "question": "孙武练兵为什么斩杀吴王的美姬", "gold": [{"volume_no": 65, "contains": "约束不明"}], "note": "三令五申"}
+{"id": "q14", "type": "positive", "question": "孔子向老子问礼的内容", "gold": [{"volume_no": 63, "contains": "将问礼於老子"}], "note": "老子韩非列传"}
+{"id": "q15", "type": "positive", "question": "张骞出使西域有什么意义", "gold": [{"volume_no": 123, "contains": "张骞凿空"}], "note": "大宛列传"}
+{"id": "q16", "type": "positive", "question": "李斯最后的下场是什么", "gold": [{"volume_no": 87, "contains": "具斯五刑"}], "note": "腰斩咸阳市"}
+{"id": "q17", "type": "positive", "question": "韩信胯下之辱是怎么回事", "gold": [{"volume_no": 92, "contains": "出胯下者"}], "note": "淮阴侯列传"}
+{"id": "q18", "type": "positive", "question": "萧何月下追韩信是怎么回事", "gold": [{"volume_no": 92, "contains": "何闻信亡"}], "note": "萧何追韩信"}
+{"id": "q19", "type": "positive", "question": "陈胜吴广起义时说了什么", "gold": [{"volume_no": 48, "contains": "王侯将相宁有种乎"}], "note": "大泽乡"}
+{"id": "q20", "type": "positive", "question": "司马迁为什么要写《史记》", "gold": [{"volume_no": 130, "contains": "发愤之所为作"}], "note": "太史公自序"}
+{"id": "n01", "type": "negative_absent", "question": "诸葛亮是如何评价曹操的", "note": "三国人物，不在《史记》"}
+{"id": "n02", "type": "negative_absent", "question": "唐玄宗和杨贵妃的故事是怎样的", "note": "唐代人物"}
+{"id": "n03", "type": "negative_absent", "question": "李白在《史记》里写过哪些诗", "note": "唐代诗人，且《史记》不录唐诗"}
+{"id": "n04", "type": "negative_absent", "question": "赤壁之战中曹操败给了谁", "note": "三国战役"}
+{"id": "n05", "type": "negative_absent", "question": "郑和下西洋到过哪些国家", "note": "明代事件"}
+{"id": "n06", "type": "negative_absent", "question": "武则天为什么能称帝", "note": "唐代人物"}
+{"id": "n07", "type": "negative_absent", "question": "玄奘取经走了哪条路线", "note": "唐代高僧"}
+{"id": "n08", "type": "negative_mismatch", "question": "司马迁是否见过秦始皇", "entities": ["司马迁", "秦始皇"], "note": "时代错置：司马迁生于秦始皇死后约百年"}
+{"id": "n09", "type": "negative_mismatch", "question": "项羽是否著有《孙子兵法》", "entities": ["项羽", "孙子"], "note": "张冠李戴：兵书为孙武所著"}
+{"id": "n10", "type": "negative_mismatch", "question": "商鞅在鸿门宴上救了刘邦吗", "entities": ["商鞅", "鸿门", "刘邦"], "note": "人物事件错配：商鞅死于前338年，鸿门宴在前206年"}
