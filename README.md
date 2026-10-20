@@ -38,6 +38,8 @@
 | 置信度门控 | `dense < 0.65 且 BM25 无命中` 时本地拒答，不消耗 API |
 | 流式输出 | DeepSeek SSE 流式返回，CLI 与 Web 均逐字渲染 |
 | 多轮对话 | Web 端保留上下文；短追问先独立检索，置信不足才合并上一轮问题 |
+| 零配置界面 | 无任何输入框：接口/模型/参数全部内置，Key 只读环境变量 |
+| 防刷 | 提问后输入框冷却 2 秒，避免连点刷请求 |
 | 可复现评测 | `evaluate.py` + `eval/questions.jsonl`，一条命令跑出 Recall / MRR |
 
 ---
@@ -262,6 +264,8 @@ python index.py --model-path D:/models/bge-small-zh-v1.5
 
 ### 4. 配置 DeepSeek
 
+界面不提供任何 API Key 输入框，只从环境变量读取：
+
 ```bash
 # Windows（新开终端生效）
 setx DEEPSEEK_API_KEY "sk-..."
@@ -270,7 +274,9 @@ setx DEEPSEEK_API_KEY "sk-..."
 export DEEPSEEK_API_KEY="sk-..."
 ```
 
-可选环境变量：`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）、`DEEPSEEK_MODEL`（默认 `deepseek-chat`）。
+接口地址固定为 `https://api.deepseek.com`，模型固定为 `deepseek-chat`。
+
+> 未读取到 Key 时，网页只显示「系统维护中，请稍后再试。」，不会引导用户配置任何东西。
 
 ### 5. 命令行问答
 
@@ -287,8 +293,11 @@ python qa.py "鸿门宴" --dry-run       # 只检索 + 预览 Prompt，不调 AP
 python -m streamlit run app.py
 ```
 
-打开 http://localhost:8501，在左侧填写 API Key（或提前 `setx`）。
-支持多轮对话、流式输出、检索依据展开与开发者参数折叠。
+打开 http://localhost:8501 直接提问即可。
+
+- 左侧边栏只有《史记》简介与使用说明，没有任何配置项
+- 支持多轮对话、流式输出、检索依据展开
+- 技术参数（阈值/分数）默认折叠在「检索详情（开发者）」中
 
 ---
 
@@ -333,11 +342,61 @@ DeepSeek 按输入 token 计费，单次问答成本不到一分钱；拒答路�
 
 ---
 
+## 部署到 Streamlit Cloud
+
+### 1. 仓库准备
+
+代码推送到 GitHub 后，在 [share.streamlit.io](https://share.streamlit.io) 新建应用：
+
+- Repository：`你的账号/shiji-rag-agent`
+- Branch：`main`
+- Main file path：`app.py`
+
+### 2. 配置 Secrets
+
+进入应用的 **Settings → Secrets**，填入：
+
+```toml
+DEEPSEEK_API_KEY = "sk-你的key"
+```
+
+保存后点击 **Reboot app**。Streamlit Cloud 会把 Secrets 以环境变量形式注入，
+`app.py` 通过 `os.environ.get("DEEPSEEK_API_KEY")` 读取，不需要在界面上填任何东西。
+
+### 3. 语料与索引
+
+仓库默认忽略了 `shiji.txt` 与 `data/`（语料与索引合计约 37 MB）。
+云端没有这些文件时，页面会显示「系统维护中」。二选一：
+
+**方案 A（推荐，简单）**：把语料和索引一起提交
+
+```bash
+git add -f shiji.txt data/chunks.jsonl data/chroma
+git commit -m "Add corpus and index for deployment"
+git push
+```
+
+**方案 B（保持仓库精简）**：只提交 `shiji.txt`，在云端首次启动时构建索引。
+需要把 `app.py` 改成启动前检查并调用 `preprocess.py` / `index.py`（首次约 3–5 分钟），
+当前版本未内置该逻辑。
+
+### 4. 资源与冷启动
+
+- 免费实例 1 GB 内存，本方案（bge-small + Chroma）常驻约 400 MB，足够
+- 首次加载模型与索引约 8 秒，之后走缓存
+- 修改 Secrets 或代码后，记得 **Reboot app**
+
+---
+
 ## 常见问题
 
-**Q：Web 页面提问返回 502 / 连接失败？**
-检查侧边栏「接口地址」是否为 `https://api.deepseek.com`，以及 Key 是否有效。
-如果之前填过 `http://127.0.0.1:8765`（本地 mock），记得改回来。
+**Q：Web 页面提示「系统维护中」？**
+说明运行环境没有读到 `DEEPSEEK_API_KEY`。本地用 `setx` 配置后新开终端重启；
+云端检查 **Settings → Secrets** 是否填写并 Reboot。
+
+**Q：本地提问报 502 / 连接失败？**
+接口地址已内置为 `https://api.deepseek.com`，不再由用户填写。
+若你之前在代码里改成了本地 mock（`127.0.0.1:8765`）做测试，记得改回并重启。
 
 **Q：终端刷大量 `No module named 'torchvision'`？**
 与项目功能无关，是 Streamlit 文件监视器在扫描 `transformers` 的图像处理模块。

@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""《史记》问答 Web 界面（Streamlit）。
+"""《史记》问答 Web 界面（面向普通用户）。
+
+设计原则：
+    - 打开即用：没有任何配置项，API Key 只从环境变量读取
+    - 不引导用户填 Key：缺少配置时只显示「系统维护中」
+    - 回答 = 白话解释 + 原文引用 + 卷篇出处；查不到就明确说未记载
+    - 提问后 2 秒冷却，防止连点刷请求
 
 启动:
-    streamlit run app.py
-
-特性:
-    - 多轮对话：保留最近几轮上下文，支持「那扶苏后来怎样了」这类追问
-    - 流式输出：st.write_stream 逐字渲染
-    - 检索依据可展开核对，标注卷/篇/段
-    - 置信度不足直接拒答，不消耗 API
-
-配置:
-    DEEPSEEK_API_KEY 环境变量，或在侧边栏临时填写（不落盘）
+    setx DEEPSEEK_API_KEY "sk-..."      # 只需一次
+    python -m streamlit run app.py
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
+import time
 
 import streamlit as st
 
 from qa import (
-    DEFAULT_BASE_URL,
-    DEFAULT_GATE,
-    DEFAULT_LLM_MODEL,
     SYSTEM_PROMPT,
     USER_TEMPLATE,
     build_context,
@@ -35,42 +32,64 @@ from qa import (
 )
 from retrieve import DEFAULT_CHUNKS, DEFAULT_COLLECTION, DEFAULT_DB, DEFAULT_MODEL
 
+# ---------------------------------------------------------------- 固定配置
+# 产品化：接口、模型、检索参数全部固定，不对用户暴露
+API_BASE_URL = "https://api.deepseek.com"
+LLM_MODEL = "deepseek-chat"
+TEMPERATURE = 0.3
+
+TOP_K = 5
+NEIGHBORS = 1
+GATE = 0.65
+COOLDOWN_SECONDS = 2.0
+
+HISTORY_TURNS = 3
+
+# ---------------------------------------------------------------- 文案
+MAINTENANCE_TEXT = "系统维护中，请稍后再试。"
+REFUSAL_TEXT = "抱歉，《史记》中未记载相关信息。"
+ERROR_TEXT = "系统开小差了，请稍后再试。"
+
 EXAMPLES = [
-    ("焚书坑儒", "秦始皇焚书坑儒的具体经过"),
     ("鸿门宴", "鸿门宴上项庄做了什么"),
-    ("司马迁写史记", "司马迁为什么要写《史记》"),
-    ("李斯之死", "李斯最后的下场是什么"),
+    ("焚书坑儒", "秦始皇焚书坑儒的具体经过"),
     ("指鹿为马", "赵高指鹿为马是怎么回事"),
+    ("李斯之死", "李斯最后的下场是什么"),
+    ("司马迁写史记", "司马迁为什么要写《史记》"),
 ]
 
-HISTORY_TURNS = 3  # 送给大模型的历史轮数
+ABOUT_TEXT = """**《史记》** 是中国第一部纪传体通史，西汉司马迁撰，
+记载了从黄帝到汉武帝约三千年的历史，共一百三十篇：
+本纪十二、表十、书八、世家三十、列传七十。
 
-# 面向普通用户的拒答文案：不暴露任何阈值/分数
-UI_REFUSAL = "抱歉，《史记》中未记载相关信息。"
+本项目把全文做成可检索的知识库：先在本地从原文中找出最相关的段落，
+再让 AI 依据这些段落作答，因此每句结论都能回溯到卷、篇和原文。
+"""
+
+USAGE_TEXT = """1. 直接在下方输入问题，例如「鸿门宴」「商鞅变法」
+2. 回答先用白话讲清来龙去脉，再引一两句原文作证
+3. 点击「检索依据」可以核对 AI 参考的原文段落
+4. 《史记》没有记载的，会明确回复「未记载」，不会编造
+"""
 
 
-st.set_page_config(
-    page_title="《史记》问答",
-    page_icon="📜",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# ---------------------------------------------------------------- 资源
 
 
-@st.cache_resource(show_spinner="加载检索模型与索引…")
-def get_retriever(chunks: str, db: str, collection: str, model: str, device: str):
+@st.cache_resource(show_spinner="正在准备《史记》知识库…")
+def get_retriever():
     namespace = argparse.Namespace(
-        chunks=chunks,
-        db=db,
-        collection=collection,
-        model=model,
-        device=device,
+        chunks=DEFAULT_CHUNKS,
+        db=DEFAULT_DB,
+        collection=DEFAULT_COLLECTION,
+        model=DEFAULT_MODEL,
+        device="cpu",
         dense_only=False,
         sparse_only=False,
         dense_k=30,
         sparse_k=30,
         expand_dense=False,
-        neighbors=0,
+        neighbors=NEIGHBORS,
         enable_rerank=False,
         reranker_model="BAAI/bge-reranker-base",
     )
@@ -78,57 +97,66 @@ def get_retriever(chunks: str, db: str, collection: str, model: str, device: str
 
 
 def init_state() -> None:
-    st.session_state.setdefault("messages", [])   # 仅用于展示
-    st.session_state.setdefault("history", [])    # 送给模型的 role/content
-    st.session_state.setdefault("pending", None)
+    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("pending_question", None)
+    st.session_state.setdefault("cooldown_until", 0.0)
 
 
-def retrieve_with_history(question: str, messages: list[dict], retriever, cfg: dict):
-    """两段式检索：先单独检索，只有置信度不足时才合并上一轮问题。
-
-    直接合并并不总是更好：问「那扶苏后来怎样了」单独检索能命中《蒙恬列传》，
-    拼上前文的「秦始皇焚书坑儒」后，jieba 反而把「扶苏」切成「扶/苏」匹配到《苏秦列传》。
-    """
-    primary, primary_meta = retriever.search(question, cfg["top_k"])
-    similarity, bm25_score = confidence_of(primary) if primary else (0.0, 0.0)
-    confident = similarity >= cfg["gate"] or bm25_score > 0
-
+def retrieval_query(question: str, previous_messages: list[dict]) -> str:
+    """短追问（「那扶苏呢」）拼上一轮问题；两段式检索在下面判断是否采用。"""
+    if len(question) > 15:
+        return question
     previous = next(
-        (item["content"] for item in reversed(messages) if item["role"] == "user"), ""
+        (item["content"] for item in reversed(previous_messages) if item["role"] == "user"), ""
     )
-    if confident or not previous or len(question) > 15:
+    if not previous or previous == question:
+        return question
+    return f"{previous} {question}"
+
+
+def retrieve(question: str, previous_messages: list[dict], retriever):
+    """先单独检索；置信度不足时才合并上一轮问题再试一次。"""
+    primary, primary_meta = retriever.search(question, TOP_K)
+    similarity, bm25_score = confidence_of(primary) if primary else (0.0, 0.0)
+    confident = similarity >= GATE or bm25_score > 0
+
+    merged = retrieval_query(question, previous_messages)
+    if confident or merged == question:
         return question, primary, primary_meta
 
-    merged_query = f"{previous} {question}"
-    merged, merged_meta = retriever.search(merged_query, cfg["top_k"])
-    merged_sim, merged_bm25 = confidence_of(merged) if merged else (0.0, 0.0)
+    merged_results, merged_meta = retriever.search(merged, TOP_K)
+    merged_sim, merged_bm25 = confidence_of(merged_results) if merged_results else (0.0, 0.0)
     if merged_bm25 > bm25_score or merged_sim > similarity + 0.02:
-        return merged_query, merged, merged_meta
+        return merged, merged_results, merged_meta
     return question, primary, primary_meta
 
 
-def render_sources(citations: list[dict], label: str = "检索依据（可核对原文）") -> None:
+# ---------------------------------------------------------------- 渲染
+
+
+def render_sources(citations: list[dict]) -> None:
     if not citations:
         return
-    with st.expander(f"{label} · {len(citations)} 块"):
+    with st.expander(f"检索依据 · {len(citations)} 段原文"):
         for item in citations:
-            tag = "上下文补充" if item["is_neighbor"] else "命中"
+            tag = "上下文" if item["is_neighbor"] else "命中"
             st.markdown(
-                f"**[{item['index']}] 《史记·{item['volume']}·{item['chapter']}》"
-                f"（段{item['para_start']}-{item['para_end']}，{tag}）**"
+                f"**[{item['index']}] 《史记·{item['volume']}·{item['chapter']}》**"
+                f"（段{item['para_start']}-{item['para_end']}，{tag}）"
             )
             st.caption(item["text"][:400] + ("…" if len(item["text"]) > 400 else ""))
 
 
 def render_tech_details(tech: dict) -> None:
-    """技术细节统一折叠，普通用户默认看不到阈值/分数。"""
+    """开发者信息，默认折叠；普通用户不展开就看不到。"""
     if not tech:
         return
     with st.expander("检索详情（开发者）"):
         st.json(tech)
 
 
-def answer_stream(question: str, context: str, history: list[dict], cfg: dict):
+def answer_stream(question: str, context: str, history: list[dict], api_key: str):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history[-HISTORY_TURNS * 2:])
     messages.append({
@@ -138,62 +166,69 @@ def answer_stream(question: str, context: str, history: list[dict], cfg: dict):
     return st.write_stream(
         iter_chat_stream(
             messages,
-            api_key=cfg["api_key"],
-            base_url=cfg["base_url"],
-            model=cfg["model"],
-            temperature=cfg["temperature"],
+            api_key=api_key,
+            base_url=API_BASE_URL,
+            model=LLM_MODEL,
+            temperature=TEMPERATURE,
         )
     )
 
 
-def handle_question(question: str, retriever, cfg: dict) -> None:
-    # 必须在写入本轮消息之前取上一轮问题
+# ---------------------------------------------------------------- 对话
+
+
+def handle_question(question: str, retriever, api_key: str) -> None:
     previous_messages = list(st.session_state.messages)
     st.session_state.messages.append({"role": "user", "content": question, "citations": []})
     with st.chat_message("user"):
         st.markdown(question)
-    retriever.args.neighbors = cfg["neighbors"]
-    query, results, meta = retrieve_with_history(question, previous_messages, retriever, cfg)
-    similarity, bm25_score = confidence_of(results) if results else (0.0, 0.0)
 
+    retriever.args.neighbors = NEIGHBORS
+    query, results, meta = retrieve(question, previous_messages, retriever)
+    similarity, bm25_score = confidence_of(results) if results else (0.0, 0.0)
     tech = {
         "检索词": query,
         "dense_similarity": round(similarity, 4),
         "bm25_score": round(bm25_score, 2),
-        "gate": cfg["gate"],
+        "gate": GATE,
         "chunks": len(results),
         "expansions": meta.get("expansions", []),
     }
 
     with st.chat_message("assistant"):
-        if not results or (similarity < cfg["gate"] and bm25_score <= 0):
-            # 面向普通用户：只说结果，不暴露阈值和分数
-            st.markdown(UI_REFUSAL)
+        # 检索置信度不足：本地拒答，不调用 API
+        if not results or (similarity < GATE and bm25_score <= 0):
+            st.markdown(REFUSAL_TEXT)
             render_tech_details(tech)
-            st.session_state.messages.append({
-                "role": "assistant", "content": UI_REFUSAL, "citations": [], "tech": tech,
-            })
-            st.session_state.history.append({"role": "user", "content": question})
-            st.session_state.history.append({"role": "assistant", "content": UI_REFUSAL})
+            _remember(question, REFUSAL_TEXT, [], tech)
             return
 
         context, citations = build_context(results)
         try:
-            with st.spinner("DeepSeek 生成中…"):
-                answer = answer_stream(question, context, st.session_state.history, cfg)
-        except SystemExit as exc:  # 接口/网络错误
-            st.error(str(exc))
-            st.session_state.messages.append({
-                "role": "assistant", "content": f"调用失败：{exc}", "citations": citations,
-            })
+            with st.spinner("正在查阅《史记》…"):
+                answer = answer_stream(question, context, st.session_state.history, api_key)
+        except SystemExit as exc:
+            print(f"[qa] DeepSeek 调用失败: {exc}", file=sys.stderr)
+            st.markdown(ERROR_TEXT)
+            tech["error"] = str(exc)[:300]
+            render_tech_details(tech)
+            _remember(question, ERROR_TEXT, [], tech)
             return
         except Exception as exc:  # noqa: BLE001
-            st.error(f"生成失败：{exc}")
+            print(f"[qa] 生成失败: {exc}", file=sys.stderr)
+            st.markdown(ERROR_TEXT)
+            tech["error"] = str(exc)[:300]
+            render_tech_details(tech)
+            _remember(question, ERROR_TEXT, [], tech)
             return
 
         render_sources(citations)
         render_tech_details(tech)
 
+    _remember(question, answer, citations, tech)
+
+
+def _remember(question: str, answer: str, citations: list[dict], tech: dict) -> None:
     st.session_state.messages.append({
         "role": "assistant", "content": answer, "citations": citations, "tech": tech,
     })
@@ -201,50 +236,50 @@ def handle_question(question: str, retriever, cfg: dict) -> None:
     st.session_state.history.append({"role": "assistant", "content": answer})
 
 
-def main() -> None:
-    init_state()
+# ---------------------------------------------------------------- 页面
 
-    st.title("📜 《史记》问答")
-    st.caption("检索增强问答 · 回答带原文引用与出处 · 查不到会明确说「未见记载」")
 
+def render_sidebar() -> None:
     with st.sidebar:
-        st.subheader("模型配置")
-        api_key = st.text_input(
-            "DeepSeek API Key",
-            value=os.getenv("DEEPSEEK_API_KEY", ""),
-            type="password",
-            help="也可用 setx DEEPSEEK_API_KEY 配置，这里填写后仅保存在会话内存",
-        )
-        model = st.text_input("模型", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_LLM_MODEL))
-        base_url = st.text_input("接口地址", value=os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL))
-        temperature = st.slider("温度", 0.0, 1.0, 0.3, 0.1)
-
+        st.markdown("## 关于《史记》")
+        st.markdown(ABOUT_TEXT)
         st.divider()
-        st.subheader("检索配置")
-        top_k = st.slider("直接命中块数", 3, 8, 5)
-        neighbors = st.slider("前后邻接块", 0, 2, 1, help="每块前后各取 N 块，防止断章取义")
-        gate = st.slider("拒答阈值（dense）", 0.50, 0.80, DEFAULT_GATE, 0.01)
-
+        st.markdown("### 使用说明")
+        st.markdown(USAGE_TEXT)
         st.divider()
+        st.markdown("### 数据范围")
+        st.caption("130 篇 · 约 62.5 万字 · 本纪 / 表 / 书 / 世家 / 列传")
         if st.button("清空对话", use_container_width=True):
             st.session_state.messages = []
             st.session_state.history = []
+            st.session_state.cooldown_until = 0.0
             st.rerun()
-        st.caption("语料：《史记》130 篇 · 2082 块 · 检索在本地 CPU 运行")
+        st.caption("回答由 AI 依据《史记》原文生成，请以引用原文为准。")
 
-    cfg = {
-        "api_key": api_key.strip(),
-        "model": model.strip() or DEFAULT_LLM_MODEL,
-        "base_url": base_url.strip() or DEFAULT_BASE_URL,
-        "temperature": temperature,
-        "top_k": top_k,
-        "neighbors": neighbors,
-        "gate": gate,
-    }
 
-    retriever = None
-    if cfg["api_key"] or st.session_state.messages:
-        retriever = get_retriever(DEFAULT_CHUNKS, DEFAULT_DB, DEFAULT_COLLECTION, DEFAULT_MODEL, "cpu")
+def main() -> None:
+    init_state()
+    st.set_page_config(
+        page_title="《史记》问答",
+        page_icon="📜",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    if not api_key:
+        # 不给用户任何配置指引，只提示维护中；运维信息写日志
+        print("[app] DEEPSEEK_API_KEY 未配置，拒绝服务", file=sys.stderr)
+        st.title("📜 《史记》问答")
+        st.info(MAINTENANCE_TEXT)
+        st.stop()
+
+    st.title("📜 《史记》问答")
+    st.caption("白话讲解 · 原文佐证 · 出处可查")
+
+    render_sidebar()
+
+    retriever = get_retriever()
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -260,27 +295,33 @@ def main() -> None:
         columns = st.columns(3)
         for index, (label, question) in enumerate(EXAMPLES):
             if columns[index % 3].button(label, use_container_width=True):
-                st.session_state.pending = question
+                st.session_state.pending_question = question
+                st.session_state.cooldown_until = time.time() + COOLDOWN_SECONDS
                 st.rerun()
 
-    prompt = st.chat_input("问一个关于《史记》的问题…")
-    if st.session_state.pending:
-        prompt = st.session_state.pending
-        st.session_state.pending = None
+    cooling = time.time() < st.session_state.cooldown_until
+    prompt = st.chat_input("问一个关于《史记》的问题…", disabled=cooling)
+    if cooling:
+        st.caption("请稍候片刻，正在准备回答…")
 
-    if not prompt:
+    # 收到新问题：先进入冷却并立即重绘，让输入框在生成期间保持禁用
+    if prompt:
+        st.session_state.pending_question = prompt
+        st.session_state.cooldown_until = time.time() + COOLDOWN_SECONDS
+        st.rerun()
+
+    question = st.session_state.pending_question
+    if not question:
         return
-    if not cfg["api_key"]:
-        st.warning(
-            "请先在侧边栏填写 DeepSeek API Key，或执行：\n\n"
-            "`setx DEEPSEEK_API_KEY \"sk-...\"`（新开终端生效）"
-        )
-        return
 
-    if retriever is None:
-        retriever = get_retriever(DEFAULT_CHUNKS, DEFAULT_DB, DEFAULT_COLLECTION, DEFAULT_MODEL, "cpu")
+    st.session_state.pending_question = None
+    handle_question(question, retriever, api_key)
 
-    handle_question(prompt, retriever, cfg)
+    # 冷却结束后重绘，恢复输入
+    remaining = st.session_state.cooldown_until - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
+    st.rerun()
 
 
 if __name__ == "__main__":
